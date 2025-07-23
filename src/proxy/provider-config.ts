@@ -22,6 +22,13 @@ export const providerConfigs: Record<ProviderName, ProviderConfig> = {
     // For Gemini, API key is typically passed as query parameter
     // but we're handling it in the auth header for consistency
   },
+  // For web-ui based testing we'll add a dummy config for the provider
+  [ProviderName.WEB_UI]: {
+    name: ProviderName.WEB_UI,
+    host: 'https://web-ui.com',
+    authHeader: 'authorization',
+    constantHeaders: {},
+  },
 };
 
 export function getProviderConfig(providerName: string): ProviderConfig | null {

@@ -9,6 +9,14 @@ import { corsMiddleware } from '../middleware/cors';
 import { ProxyHandler } from '../proxy/proxy-handler';
 import { logger } from '../utils/logger';
 import { getSupportedProviders } from '../proxy/provider-config';
+import { dbConnection } from '../database/connection';
+import { firebaseAdmin } from '../auth/firebase-admin';
+import { apiRouter } from '../api/routes';
+import { rateLimiter } from '../interceptors/request/rate-limiter';
+import { quotaChecker } from '../interceptors/request/quota-checker';
+import { requestValidator } from '../interceptors/request/request-validator';
+import { usageTracker } from '../interceptors/response/usage-tracker';
+import { AuthMiddleware } from '../auth/auth-middleware';
 
 // Create Koa app
 const app = new Koa();
@@ -35,10 +43,28 @@ router.get('/ready', (ctx) => {
   };
 });
 
-// Main proxy route - catch all
-router.all('/(.*)', async (ctx) => {
-  await proxyHandler.handleRequest(ctx);
-});
+// API routes (with authentication)
+router.use('/_api', apiRouter.routes(), apiRouter.allowedMethods());
+
+// Proxy routes with interceptors
+router.all('/(.*)', 
+  // Required auth for proxy (supports both Firebase and PAT)
+  AuthMiddleware.requireAuth(),
+  
+  // Request interceptors
+  requestValidator.createSecurityMiddleware(),
+  requestValidator.createMiddleware(),
+  rateLimiter.createMiddleware(),
+  quotaChecker.createMiddleware(),
+  
+  // Response interceptors
+  usageTracker.createMiddleware(),
+  
+  // Main proxy handler
+  async (ctx) => {
+    await proxyHandler.handleRequest(ctx);
+  }
+);
 
 // Apply middleware
 app.use(errorHandler);
@@ -65,8 +91,26 @@ app.use(router.routes());
 app.use(router.allowedMethods());
 
 // Start server
-export function startServer(): void {
+export async function startServer(): Promise<void> {
   validateConfig();
+  
+  // Connect to MongoDB
+  try {
+    await dbConnection.connect();
+    logger.info('Database connection established');
+  } catch (error) {
+    logger.error('Failed to connect to database:', error);
+    process.exit(1);
+  }
+
+  // Initialize Firebase Admin SDK
+  try {
+    firebaseAdmin.initialize();
+    logger.info('Firebase Admin SDK initialized');
+  } catch (error) {
+    logger.error('Failed to initialize Firebase:', error);
+    // Don't exit, Firebase is optional
+  }
   
   const server = app.listen(config.port, () => {
     logger.info('AI Guard proxy server started', {
@@ -77,17 +121,19 @@ export function startServer(): void {
   });
 
   // Graceful shutdown
-  process.on('SIGTERM', () => {
+  process.on('SIGTERM', async () => {
     logger.info('SIGTERM received, shutting down gracefully');
-    server.close(() => {
+    server.close(async () => {
+      await dbConnection.disconnect();
       logger.info('Server closed');
       process.exit(0);
     });
   });
 
-  process.on('SIGINT', () => {
+  process.on('SIGINT', async () => {
     logger.info('SIGINT received, shutting down gracefully');
-    server.close(() => {
+    server.close(async () => {
+      await dbConnection.disconnect();
       logger.info('Server closed');
       process.exit(0);
     });
