@@ -1,0 +1,1643 @@
+openapi: 3.0.3
+info:
+  title: AI Guard - Enterprise AI API Management Platform
+  description: |
+    AI Guard is a comprehensive API management platform that provides secure, monitored access to multiple AI providers (OpenAI, Anthropic, Google Gemini) with advanced features like multi-tenancy, authentication, rate limiting, usage tracking, and audit logging.
+    
+    ## Authentication
+    
+    AI Guard supports two authentication methods:
+    
+    1. **Firebase Authentication**: Use Firebase ID tokens for user authentication
+    2. **Personal Access Tokens (PAT)**: Use generated tokens for server-to-server communication
+    
+    ## Rate Limiting
+
+    All API endpoints are subject to rate limiting based on user tier:
+    - **Free**: 10 requests/minute
+    - **Pro**: 100 requests/minute  
+    - **Enterprise**: 1000 requests/minute
+    
+    ## Error Responses
+    
+    All endpoints return structured error responses with helpful suggestions:
+    ```json
+    {
+      "error": {
+        "type": "AUTHENTICATION_ERROR",
+        "message": "Invalid or expired token",
+        "statusCode": 401,
+        "timestamp": "2024-01-01T00:00:00Z",
+        "suggestions": ["Check your authorization header"]
+      }
+    }
+    ```
+  version: 2.0.0
+  contact:
+    name: AI Guard Support
+    email: support@aiguard.dev
+  license:
+    name: ISC
+    url: https://opensource.org/licenses/ISC
+
+servers:
+  - url: http://localhost:3000
+    description: Development server
+  - url: https://api.aiguard.dev
+    description: Production server
+
+# Security schemes
+components:
+  securitySchemes:
+    FirebaseAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Firebase ID Token obtained from Firebase Authentication
+    PersonalAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: PAT
+      description: Personal Access Token generated via API
+    AdminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+      description: Admin secret key for administrative operations
+
+  schemas:
+    # Common schemas
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            type:
+              type: string
+              enum: [AUTHENTICATION_ERROR, AUTHORIZATION_ERROR, VALIDATION_ERROR, RATE_LIMIT_ERROR, QUOTA_EXCEEDED, NOT_FOUND, INTERNAL_ERROR]
+            message:
+              type: string
+            statusCode:
+              type: integer
+            timestamp:
+              type: string
+              format: date-time
+            path:
+              type: string
+            method:
+              type: string
+            requestId:
+              type: string
+            suggestions:
+              type: array
+              items:
+                type: string
+          required: [type, message, statusCode, timestamp]
+      required: [error]
+
+    # User schemas
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          description: User ID
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended, deleted]
+        defaultProject:
+          type: string
+          description: Default project ID
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        lastLoginAt:
+          type: string
+          format: date-time
+      required: [id, email, name, status, createdAt, updatedAt]
+
+    UserProfile:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        defaultProject:
+          type: string
+          description: Default project ID
+      required: [name]
+
+    # Personal Access Token schemas
+    PersonalAccessToken:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        token:
+          type: string
+          description: Only returned during creation
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [api:read, api:write, projects:read, projects:write, users:read, users:write, admin]
+        projectId:
+          type: string
+          description: Optional project scope
+        lastUsedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        isRevoked:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, name, scopes, createdAt]
+
+    CreateTokenRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Descriptive name for the token
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [api:read, api:write, projects:read, projects:write, users:read, users:write, admin]
+          minItems: 1
+          description: Array of permission scopes
+        projectId:
+          type: string
+          description: Optional project ID to scope the token
+        expiresInDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Token expiration in days (optional)
+      required: [name, scopes]
+
+    # Project schemas
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        ownerId:
+          type: string
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectMember'
+        memberCount:
+          type: integer
+        apiKeyCount:
+          type: integer
+        userRole:
+          type: string
+          enum: [owner, admin, member]
+        settings:
+          $ref: '#/components/schemas/ProjectSettings'
+        usage:
+          $ref: '#/components/schemas/UsageMetrics'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, name, ownerId, members, createdAt, updatedAt]
+
+    ProjectMember:
+      type: object
+      properties:
+        userId:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member]
+        addedAt:
+          type: string
+          format: date-time
+      required: [userId, role, addedAt]
+
+    ProjectSettings:
+      type: object
+      properties:
+        rateLimitOverride:
+          type: object
+          properties:
+            windowMs:
+              type: integer
+              description: Rate limit window in milliseconds
+            maxRequests:
+              type: integer
+              description: Maximum requests per window
+        quotaOverride:
+          type: object
+          properties:
+            monthlyLimit:
+              type: integer
+            dailyLimit:
+              type: integer
+        allowedProviders:
+          type: array
+          items:
+            type: string
+            enum: [openai, anthropic, gemini]
+        webhookUrl:
+          type: string
+          format: uri
+
+    UsageMetrics:
+      type: object
+      properties:
+        currentMonth:
+          type: object
+          properties:
+            requests:
+              type: integer
+            tokens:
+              type: integer
+            cost:
+              type: number
+              format: float
+        currentDay:
+          type: object
+          properties:
+            requests:
+              type: integer
+            tokens:
+              type: integer
+            cost:
+              type: number
+              format: float
+        lastUpdated:
+          type: string
+          format: date-time
+
+    CreateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Project name
+      required: [name]
+
+    UpdateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        settings:
+          $ref: '#/components/schemas/ProjectSettings'
+
+    # API Key schemas
+    ApiKey:
+      type: object
+      properties:
+        keyId:
+          type: string
+        provider:
+          type: string
+          enum: [openai, anthropic, gemini]
+        maskedKey:
+          type: string
+          description: Masked version of the API key for security
+        isActive:
+          type: boolean
+        addedBy:
+          type: string
+          description: User ID who added the key
+        addedAt:
+          type: string
+          format: date-time
+      required: [keyId, provider, maskedKey, isActive, addedBy, addedAt]
+
+    AddApiKeyRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [openai, anthropic, gemini]
+          description: AI provider name
+        apiKey:
+          type: string
+          minLength: 10
+          description: The actual API key from the provider
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Descriptive name for the key
+      required: [provider, apiKey]
+
+    # Usage and Analytics schemas
+    UsageStats:
+      type: object
+      properties:
+        projectId:
+          type: string
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        totalRequests:
+          type: integer
+        totalTokens:
+          type: integer
+        totalCost:
+          type: number
+          format: float
+        byProvider:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              requests:
+                type: integer
+              tokens:
+                type: integer
+              cost:
+                type: number
+                format: float
+        byModel:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              requests:
+                type: integer
+              tokens:
+                type: integer
+              cost:
+                type: number
+                format: float
+
+    QuotaStatus:
+      type: object
+      properties:
+        projectId:
+          type: string
+        monthlyUsage:
+          type: integer
+        monthlyLimit:
+          type: integer
+        monthlyRemaining:
+          type: integer
+        dailyUsage:
+          type: integer
+        dailyLimit:
+          type: integer
+        dailyRemaining:
+          type: integer
+      required: [projectId, monthlyUsage, monthlyLimit, monthlyRemaining, dailyUsage, dailyLimit, dailyRemaining]
+
+    # Team Management schemas
+    AddMemberRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          description: Email of the user to invite
+        role:
+          type: string
+          enum: [admin, member]
+          description: Role to assign to the new member
+      required: [email, role]
+
+    # Admin schemas
+    SystemHealth:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        timestamp:
+          type: string
+          format: date-time
+        database:
+          type: object
+          properties:
+            connected:
+              type: boolean
+        cache:
+          type: object
+          properties:
+            keys:
+              type: integer
+            hits:
+              type: integer
+            misses:
+              type: integer
+            hitRate:
+              type: number
+              format: float
+        uptime:
+          type: number
+          description: Server uptime in seconds
+        memory:
+          type: object
+          properties:
+            used:
+              type: integer
+            total:
+              type: integer
+
+    AdminUserUpdate:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [active, suspended, deleted]
+      required: [status]
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        resourceId:
+          type: string
+        details:
+          type: object
+        ipAddress:
+          type: string
+        userAgent:
+          type: string
+        status:
+          type: string
+          enum: [success, failure]
+        errorMessage:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+# API Paths
+paths:
+  # Health Check Endpoints
+  /health:
+    get:
+      tags: [Health]
+      summary: Basic health check
+      description: Check if the service is running
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      description: Check if the service is ready to serve requests
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ready"
+                  providers:
+                    type: array
+                    items:
+                      type: string
+                    example: ["openai", "anthropic", "gemini"]
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /_api/health:
+    get:
+      tags: [Health]
+      summary: API health check
+      description: Check API service health
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  version:
+                    type: string
+                    example: "2.0.0"
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  # User Management Endpoints
+  /_api/users/profile:
+    get:
+      tags: [Users]
+      summary: Get user profile
+      description: Retrieve the current user's profile information
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      responses:
+        '200':
+          description: User profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      tags: [Users]
+      summary: Update user profile
+      description: Update the current user's profile information
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserProfile'
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /_api/users/account:
+    delete:
+      tags: [Users]
+      summary: Delete user account
+      description: Permanently delete the user account and all associated data
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      responses:
+        '200':
+          description: Account deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Account deleted successfully"
+                  deletedAt:
+                    type: string
+                    format: date-time
+
+  # Personal Access Token Endpoints
+  /_api/users/tokens:
+    get:
+      tags: [Personal Access Tokens]
+      summary: List personal access tokens
+      description: Get all personal access tokens for the current user
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: includeRevoked
+          in: query
+          description: Include revoked tokens in the response
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Tokens retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PersonalAccessToken'
+                  total:
+                    type: integer
+
+    post:
+      tags: [Personal Access Tokens]
+      summary: Create personal access token
+      description: Generate a new personal access token
+      security:
+        - FirebaseAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTokenRequest'
+      responses:
+        '201':
+          description: Token created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonalAccessToken'
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /_api/users/tokens/{tokenId}:
+    delete:
+      tags: [Personal Access Tokens]
+      summary: Revoke personal access token
+      description: Revoke a personal access token
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          description: ID of the token to revoke
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Token revoked successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Token revoked successfully"
+                  tokenId:
+                    type: string
+                  revokedAt:
+                    type: string
+                    format: date-time
+
+  /_api/users/tokens/{tokenId}/rotate:
+    post:
+      tags: [Personal Access Tokens]
+      summary: Rotate personal access token
+      description: Generate a new token with the same properties and revoke the old one
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          description: ID of the token to rotate
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Token rotated successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PersonalAccessToken'
+                  - type: object
+                    properties:
+                      rotatedFrom:
+                        type: string
+                        description: ID of the old token
+
+  # Project Management Endpoints
+  /_api/projects:
+    get:
+      tags: [Projects]
+      summary: List projects
+      description: Get all projects the user has access to
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      responses:
+        '200':
+          description: Projects retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+                  total:
+                    type: integer
+
+    post:
+      tags: [Projects]
+      summary: Create project
+      description: Create a new project
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProjectRequest'
+      responses:
+        '201':
+          description: Project created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+
+  /_api/projects/{id}:
+    get:
+      tags: [Projects]
+      summary: Get project details
+      description: Get detailed information about a specific project
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Project details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '403':
+          description: Access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      tags: [Projects]
+      summary: Update project
+      description: Update project information (requires admin or owner role)
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectRequest'
+      responses:
+        '200':
+          description: Project updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+
+    delete:
+      tags: [Projects]
+      summary: Delete project
+      description: Delete a project (owner only)
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Project deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Project deleted successfully"
+                  projectId:
+                    type: string
+                  deletedAt:
+                    type: string
+                    format: date-time
+
+  # API Key Management Endpoints
+  /_api/projects/{id}/keys:
+    get:
+      tags: [API Keys]
+      summary: List project API keys
+      description: Get all API keys for a project (keys are masked for security)
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API keys retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKey'
+                  total:
+                    type: integer
+
+    post:
+      tags: [API Keys]
+      summary: Add API key
+      description: Add a new API key to the project (requires admin or owner role)
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddApiKeyRequest'
+      responses:
+        '201':
+          description: API key added successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "API key added successfully"
+                  keyId:
+                    type: string
+                  provider:
+                    type: string
+                  maskedKey:
+                    type: string
+                  addedAt:
+                    type: string
+                    format: date-time
+
+  /_api/projects/{id}/keys/{keyId}:
+    delete:
+      tags: [API Keys]
+      summary: Remove API key
+      description: Remove an API key from the project (requires admin or owner role)
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+        - name: keyId
+          in: path
+          required: true
+          description: API Key ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key removed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "API key removed successfully"
+                  keyId:
+                    type: string
+                  removedAt:
+                    type: string
+                    format: date-time
+
+  # Usage and Analytics Endpoints
+  /_api/projects/{id}/usage:
+    get:
+      tags: [Analytics]
+      summary: Get project usage statistics
+      description: Get detailed usage statistics for a project
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+        - name: startDate
+          in: query
+          description: Start date for usage period (ISO 8601)
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          description: End date for usage period (ISO 8601)
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Usage statistics retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageStats'
+
+  /_api/projects/{id}/quota:
+    get:
+      tags: [Analytics]
+      summary: Get project quota status
+      description: Get current quota usage and limits for a project
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Quota status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotaStatus'
+
+  # Team Management Endpoints
+  /_api/projects/{id}/members:
+    post:
+      tags: [Team Management]
+      summary: Add team member
+      description: Invite a new member to the project (requires admin or owner role)
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMemberRequest'
+      responses:
+        '201':
+          description: Member added successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Member added successfully"
+                  member:
+                    type: object
+                    properties:
+                      userId:
+                        type: string
+                      email:
+                        type: string
+                      name:
+                        type: string
+                      role:
+                        type: string
+                      addedAt:
+                        type: string
+                        format: date-time
+
+  /_api/projects/{id}/members/{memberId}:
+    delete:
+      tags: [Team Management]
+      summary: Remove team member
+      description: Remove a member from the project (requires admin or owner role)
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Project ID
+          schema:
+            type: string
+        - name: memberId
+          in: path
+          required: true
+          description: Member User ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Member removed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Member removed successfully"
+                  memberId:
+                    type: string
+                  removedAt:
+                    type: string
+                    format: date-time
+
+  # Admin Endpoints
+  /_api/admin/system/health:
+    get:
+      tags: [Admin]
+      summary: Get system health
+      description: Get comprehensive system health information (admin only)
+      security:
+        - AdminKey: []
+        - PersonalAccessToken: []
+      responses:
+        '200':
+          description: System health retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemHealth'
+
+  /_api/admin/users:
+    get:
+      tags: [Admin]
+      summary: List all users
+      description: Get paginated list of all users (admin only)
+      security:
+        - AdminKey: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: page
+          in: query
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          description: Items per page
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: status
+          in: query
+          description: Filter by user status
+          schema:
+            type: string
+            enum: [active, suspended, deleted]
+      responses:
+        '200':
+          description: Users retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      pages:
+                        type: integer
+
+  /_api/admin/users/{id}:
+    put:
+      tags: [Admin]
+      summary: Update user status
+      description: Update a user's status (admin only)
+      security:
+        - AdminKey: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: User ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminUserUpdate'
+      responses:
+        '200':
+          description: User updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  /_api/admin/audit:
+    get:
+      tags: [Admin]
+      summary: Get audit logs
+      description: Get system audit logs (admin only)
+      security:
+        - AdminKey: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: page
+          in: query
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          description: Items per page
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: userId
+          in: query
+          description: Filter by user ID
+          schema:
+            type: string
+        - name: action
+          in: query
+          description: Filter by action type
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audit logs retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLog'
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      pages:
+                        type: integer
+
+  /_api/admin/cache/clear:
+    post:
+      tags: [Admin]
+      summary: Clear cache
+      description: Clear application cache (admin only)
+      security:
+        - AdminKey: []
+        - PersonalAccessToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pattern:
+                  type: string
+                  description: Cache pattern to clear (optional)
+      responses:
+        '200':
+          description: Cache cleared successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Cache cleared"
+                  pattern:
+                    type: string
+                  clearedKeys:
+                    type: integer
+
+  /_api/admin/analytics/usage:
+    get:
+      tags: [Admin]
+      summary: Get system usage analytics
+      description: Get system-wide usage analytics (admin only)
+      security:
+        - AdminKey: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: startDate
+          in: query
+          description: Start date for analytics period (ISO 8601)
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          description: End date for analytics period (ISO 8601)
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: System analytics retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: object
+                    properties:
+                      start:
+                        type: string
+                        format: date-time
+                      end:
+                        type: string
+                        format: date-time
+                  analytics:
+                    type: array
+                    items:
+                      type: object
+                  summary:
+                    type: object
+                    properties:
+                      totalRequests:
+                        type: integer
+                      totalTokens:
+                        type: integer
+                      totalCost:
+                        type: number
+                        format: float
+
+# AI Proxy Endpoints (these are the actual AI API calls)
+  /v1/chat/completions:
+    post:
+      tags: [AI Proxy - OpenAI]
+      summary: OpenAI Chat Completions
+      description: |
+        Proxy to OpenAI's chat completions API. Requires X-AI-Guard-Provider header set to 'openai'.
+        
+        This endpoint forwards requests to OpenAI's API while handling authentication, rate limiting, and usage tracking automatically.
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: X-AI-Guard-Provider
+          in: header
+          required: true
+          description: Must be set to 'openai'
+          schema:
+            type: string
+            enum: [openai]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model:
+                  type: string
+                  example: "gpt-4"
+                  description: The model to use for completion
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum: [system, user, assistant]
+                      content:
+                        type: string
+                  example:
+                    - role: "user"
+                      content: "Hello, how are you?"
+                max_tokens:
+                  type: integer
+                  example: 150
+                temperature:
+                  type: number
+                  minimum: 0
+                  maximum: 2
+                  example: 0.7
+                stream:
+                  type: boolean
+                  example: false
+              required: [model, messages]
+      responses:
+        '200':
+          description: Successful response from OpenAI
+          headers:
+            X-RateLimit-Limit:
+              description: Rate limit for the current window
+              schema:
+                type: integer
+            X-RateLimit-Remaining:
+              description: Remaining requests in current window
+              schema:
+                type: integer
+            X-Quota-Monthly-Remaining:
+              description: Remaining monthly quota
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                type: object
+                description: OpenAI API response
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/messages:
+    post:
+      tags: [AI Proxy - Anthropic]
+      summary: Anthropic Messages API
+      description: |
+        Proxy to Anthropic's messages API. Requires X-AI-Guard-Provider header set to 'anthropic'.
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: X-AI-Guard-Provider
+          in: header
+          required: true
+          description: Must be set to 'anthropic'
+          schema:
+            type: string
+            enum: [anthropic]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model:
+                  type: string
+                  example: "claude-3-sonnet-20240229"
+                max_tokens:
+                  type: integer
+                  example: 150
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum: [user, assistant]
+                      content:
+                        type: string
+                  example:
+                    - role: "user"
+                      content: "Hello, how are you?"
+                temperature:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  example: 0.7
+                stream:
+                  type: boolean
+                  example: false
+              required: [model, max_tokens, messages]
+      responses:
+        '200':
+          description: Successful response from Anthropic
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Anthropic API response
+
+  /v1beta/models/{model}/generateContent:
+    post:
+      tags: [AI Proxy - Google Gemini]
+      summary: Google Gemini Generate Content
+      description: |
+        Proxy to Google's Gemini API. Requires X-AI-Guard-Provider header set to 'gemini'.
+      security:
+        - FirebaseAuth: []
+        - PersonalAccessToken: []
+      parameters:
+        - name: X-AI-Guard-Provider
+          in: header
+          required: true
+          description: Must be set to 'gemini'
+          schema:
+            type: string
+            enum: [gemini]
+        - name: model
+          in: path
+          required: true
+          description: The Gemini model to use
+          schema:
+            type: string
+            example: "gemini-pro"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contents:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      parts:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            text:
+                              type: string
+                  example:
+                    - parts:
+                        - text: "Hello, how are you?"
+                generationConfig:
+                  type: object
+                  properties:
+                    temperature:
+                      type: number
+                      minimum: 0
+                      maximum: 1
+                    maxOutputTokens:
+                      type: integer
+                    topP:
+                      type: number
+                      minimum: 0
+                      maximum: 1
+                    topK:
+                      type: integer
+                      minimum: 1
+              required: [contents]
+      responses:
+        '200':
+          description: Successful response from Google Gemini
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Gemini API response
+
+# Tags for grouping endpoints
+tags:
+  - name: Health
+    description: Service health and readiness checks
+  - name: Users
+    description: User profile management
+  - name: Personal Access Tokens
+    description: Personal Access Token (PAT) management
+  - name: Projects
+    description: Project management and organization
+  - name: API Keys
+    description: Provider API key management
+  - name: Analytics
+    description: Usage analytics and monitoring
+  - name: Team Management
+    description: Team collaboration and member management
+  - name: Admin
+    description: Administrative operations (admin only)
+  - name: AI Proxy - OpenAI
+    description: OpenAI API proxy endpoints
+  - name: AI Proxy - Anthropic
+    description: Anthropic API proxy endpoints
+  - name: AI Proxy - Google Gemini
+    description: Google Gemini API proxy endpoints

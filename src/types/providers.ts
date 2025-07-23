@@ -2,6 +2,7 @@ export enum ProviderName {
   OPENAI = 'openai',
   ANTHROPIC = 'anthropic',
   GEMINI = 'gemini',
+  WEB_UI = 'web-ui',
 }
 
 export interface ProviderConfig {

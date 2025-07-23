@@ -37,4 +37,6 @@ export interface RequestMetadata {
   method: string;
   path: string;
   clientIp?: string;
+  keySource?: 'project' | 'user' | 'system';
+  keyId?: string;
 }

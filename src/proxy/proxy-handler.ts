@@ -3,9 +3,10 @@ import { AxiosRequestConfig } from 'axios';
 import { HttpClient } from '../utils/http-client';
 import { logRequest, logError, logStreamingStart, logStreamingEnd } from '../utils/logger';
 import { ProxyError, ProxyErrorType, RequestMetadata } from '../types/proxy';
-import { ProviderName } from '../types/providers';
 import { getProviderConfig } from './provider-config';
 import { Readable } from 'stream';
+import { ApiKeyResolver } from './api-key-resolver';
+import { AuthState } from '../auth/auth-middleware';
 
 export class ProxyHandler {
   private httpClient: HttpClient;
@@ -15,6 +16,11 @@ export class ProxyHandler {
   }
 
   async handleRequest(ctx: Context): Promise<void> {
+    // Skip proxy processing for internal API routes
+    if (ctx.path.startsWith('/_api')) {
+      return;
+    }
+    
     const requestId = this.generateRequestId();
     const startTime = Date.now();
     
@@ -50,15 +56,38 @@ export class ProxyHandler {
         );
       }
 
-      // Get API key for provider
-      const apiKey = this.getApiKey(providerConfig.name);
-      if (!apiKey) {
+      // Get authenticated user and project from context
+      const authState = ctx.state.auth as AuthState | undefined;
+      const user = authState?.user;
+      const project = authState?.project;
+
+      // Check if provider is allowed for the project
+      if (project && !ApiKeyResolver.isProviderAllowed(project, providerConfig.name)) {
+        throw new ProxyError(
+          ProxyErrorType.INVALID_REQUEST,
+          403,
+          `Provider ${providerName} is not allowed for this project`,
+        );
+      }
+
+      // Resolve API key dynamically
+      const keyResolution = await ApiKeyResolver.resolveApiKey(
+        user,
+        project,
+        providerConfig.name
+      );
+
+      if (!keyResolution) {
         throw new ProxyError(
           ProxyErrorType.CONFIGURATION_ERROR,
           500,
           `API key not configured for provider: ${providerName}`,
         );
       }
+
+      const { apiKey, source, keyId } = keyResolution;
+      metadata.keySource = source;
+      metadata.keyId = keyId;
 
       // Build target URL
       const targetUrl = new URL(ctx.path, providerConfig.host);
@@ -106,12 +135,9 @@ export class ProxyHandler {
         });
       }
 
-      // Set auth header (this will override any existing auth header)
-      if (providerConfig.authPrefix) {
-        headers[providerConfig.authHeader] = `${providerConfig.authPrefix} ${apiKey}`;
-      } else {
-        headers[providerConfig.authHeader] = apiKey;
-      }
+      // Set auth header using the resolver
+      const authHeader = ApiKeyResolver.getAuthorizationHeader(providerConfig.name, apiKey);
+      headers[authHeader.header] = authHeader.value;
 
       // Set host header
       headers['host'] = new URL(providerConfig.host).host;
@@ -216,15 +242,6 @@ export class ProxyHandler {
     );
   }
 
-  private getApiKey(provider: ProviderName): string | null {
-    const envKeyMap: Record<ProviderName, string> = {
-      [ProviderName.OPENAI]: 'OPENAI_API_KEY',
-      [ProviderName.ANTHROPIC]: 'ANTHROPIC_API_KEY',
-      [ProviderName.GEMINI]: 'GEMINI_API_KEY',
-    };
-
-    return process.env[envKeyMap[provider]] || null;
-  }
 
   private handleError(ctx: Context, error: Error): void {
     if (error instanceof ProxyError) {
