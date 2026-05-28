@@ -5,6 +5,12 @@ import { PatGenerator } from '../../auth/pat/pat-generator';
 import { ScopeValidator } from '../../auth/pat/pat-scopes';
 import { logger } from '../../utils/logger';
 import { ProxyError, ProxyErrorType } from '../../types/proxy';
+import { projectRepository } from '../../database/repositories';
+import { providerSnippetRepository } from '../../database/repositories/provider-snippet.repository';
+import { patCreatedTemplate } from '../../services/mail/templates/pat-created.template';
+import { firebaseAdmin } from '../../auth';
+import { forgotPasswordTemplate } from '../../services/mail/templates/forgot-password.template';
+import { brevoService } from '../../services/mail/mail.service';
 
 export class UsersController {
   /**
@@ -17,10 +23,10 @@ export class UsersController {
       if (!auth?.user) {
         throw new ProxyError(ProxyErrorType.AUTHENTICATION_ERROR, 401, 'Authentication required');
       }
-      
+
       const userId = auth.user._id;
       const user = await userRepository.getUserWithDefaultProject(userId);
-      
+
       if (!user) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'User not found');
       }
@@ -29,6 +35,7 @@ export class UsersController {
         id: user._id,
         email: user.email,
         name: user.name,
+        role: user.role,
         status: user.status,
         defaultProject: user.defaultProject,
         createdAt: user.createdAt,
@@ -37,6 +44,37 @@ export class UsersController {
       };
     } catch (error) {
       logger.error('Failed to get user profile:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all user profile
+   * GET /_api/users
+   */
+  static async listProfiles(ctx: Context): Promise<void> {
+    try {
+      const auth = ctx.state.auth;
+      if (!auth?.user) {
+        throw new ProxyError(ProxyErrorType.AUTHENTICATION_ERROR, 401, 'Authentication required');
+      }
+
+      const users = await userRepository.getActiveUsers();
+
+      ctx.body = {
+        users: users.map(user => ({
+          id: user._id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          status: user.status,
+          createdAt: user.createdAt,
+          lastLoginAt: user.lastLoginAt,
+        })),
+        total: users.length,
+      };
+    } catch (error) {
+      logger.error('Failed to get user profiles:', error);
       throw error;
     }
   }
@@ -64,7 +102,7 @@ export class UsersController {
       }
 
       const updatedUser = await userRepository.updateUser(userId, updateData);
-      
+
       if (!updatedUser) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'User not found');
       }
@@ -95,10 +133,15 @@ export class UsersController {
         return;
       }
       const userId = ctx.state.auth.user._id;
-      
+
+      const user = await userRepository.findById(userId);
+      if (user?.firebaseUid) {
+        await firebaseAdmin.disableUser(user.firebaseUid);
+      }
+
       // Soft delete the user
       const deletedUser = await userRepository.deleteUser(userId);
-      
+
       if (!deletedUser) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'User not found');
       }
@@ -130,21 +173,54 @@ export class UsersController {
         ctx.body = { error: 'Authentication required' };
         return;
       }
-      const userId = ctx.state.auth.user._id.toString();
-      const { name, scopes, projectId, expiresInDays } = ctx.request.body as any;
+      const authUserId = ctx.state.auth.user._id.toString();
+      const { name, scopes, llmProvider, projectId, userId, expiresInDays } = ctx.request.body as any;
 
       // Validate required fields
       if (!name) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Token name is required');
+      }
+      if (typeof name !== "string") {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Name must be a string");
       }
 
       if (!scopes || !Array.isArray(scopes) || scopes.length === 0) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'At least one scope is required');
       }
 
+      if (!llmProvider || typeof llmProvider !== 'string') {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'LLM provider is required');
+      }
+
+      // Validate provider
+      const validProviders = ['openai', 'anthropic', 'gemini'];
+      if (!validProviders.includes(llmProvider.toLowerCase())) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Invalid provider');
+      }
+
       // Validate scopes
       if (!ScopeValidator.validateScopes(scopes)) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Invalid scopes provided');
+      }
+
+      //Check the token generator project member or not
+      const isMember = await projectRepository.isMember(projectId, authUserId);
+
+      if (!isMember) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'User not a member of the project');
+      }
+
+      const memberRole = await projectRepository.getMemberRole(projectId, authUserId);
+      if (memberRole == 'member') {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 403, 'Members are not allowed to create PAT');
+
+      }
+
+      //Check the target user should project member
+      const targetMember = await projectRepository.isMember(projectId, userId);
+
+      if (!targetMember) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 403, 'User not a member of the project');
       }
 
       // Check name uniqueness
@@ -156,20 +232,52 @@ export class UsersController {
       // Generate token
       const { token, tokenRecord } = await PatGenerator.generateToken({
         userId,
+        createdBy: authUserId,
         projectId,
         name,
         scopes,
+        llmProvider,
         expiresInDays,
       });
+
+      const snippets = await providerSnippetRepository.getProviderSnippet(llmProvider);
+      if (!snippets) {
+        throw new ProxyError(ProxyErrorType.NOT_FOUND_ERROR, 404, 'Provider snippets not found');
+      }
+
+      const user = await userRepository.findById(userId);
+
+      if (!user) {
+        throw new ProxyError(ProxyErrorType.NOT_FOUND_ERROR, 404, 'User not found');
+      }
+      // Enable sending OTP once the email service is ready
+      const SENT_MAIL = true;
+
+      if (user && SENT_MAIL) {
+        const html = patCreatedTemplate(user.name, token, snippets);
+        await brevoService.sendMail(
+          user.email,
+          "Your AI Guard PAT Token",
+          html
+        );
+      }
 
       ctx.body = {
         id: tokenRecord._id,
         name: tokenRecord.name,
         token, // Only returned once during creation
         scopes: tokenRecord.scopes,
+        llmProvider: tokenRecord.llmProvider,
         projectId: tokenRecord.projectId,
+        userId: tokenRecord.userId,
         expiresAt: tokenRecord.expiresAt,
         createdAt: tokenRecord.createdAt,
+        snippets: {
+          curl: snippets.curl,
+          node: snippets.node,
+          python: snippets.python,
+          java: snippets.java
+        }
       };
     } catch (error) {
       logger.error('Failed to create token:', error);
@@ -183,16 +291,11 @@ export class UsersController {
    */
   static async listTokens(ctx: Context): Promise<void> {
     try {
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
       const includeRevoked = ctx.query.includeRevoked === 'true';
-      
+
       const tokens = await tokenRepository.findByUserId(userId, includeRevoked);
-      
+
       ctx.body = {
         tokens: tokens.map(token => ({
           id: token._id,
@@ -218,12 +321,7 @@ export class UsersController {
    */
   static async revokeToken(ctx: Context): Promise<void> {
     try {
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
       const tokenId = ctx.params.tokenId;
 
       // Check if token belongs to user
@@ -233,7 +331,7 @@ export class UsersController {
       }
 
       const revokedToken = await tokenRepository.revokeToken(tokenId);
-      
+
       if (!revokedToken) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Token not found');
       }
@@ -255,21 +353,35 @@ export class UsersController {
    */
   static async rotateToken(ctx: Context): Promise<void> {
     try {
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id.toString();
+      const userId = ctx.state.auth!.user._id.toString();
       const tokenId = ctx.params.tokenId;
 
       const result = await PatGenerator.rotateToken(tokenId, userId);
-      
+
       if (!result) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Token not found or unauthorized');
       }
 
       const { token, tokenRecord } = result;
+
+      const snippets = await providerSnippetRepository.getProviderSnippet(tokenRecord.llmProvider);
+      if (!snippets) {
+        throw new ProxyError(ProxyErrorType.NOT_FOUND_ERROR, 404, 'Provider snippets not found');
+      }
+
+      const user = await userRepository.findById(tokenRecord.userId);
+      if (!user) {
+        throw new ProxyError(ProxyErrorType.NOT_FOUND_ERROR, 404, 'User not found');
+      }
+      const SENT_MAIL = true;
+      if (SENT_MAIL) {
+        const html = patCreatedTemplate(user.name, token, snippets);
+        await brevoService.sendMail(
+          user.email,
+          "Your Rotated AI Guard PAT Token",
+          html
+        );
+      }
 
       ctx.body = {
         id: tokenRecord._id,
@@ -277,6 +389,13 @@ export class UsersController {
         token, // New token - only returned once
         scopes: tokenRecord.scopes,
         projectId: tokenRecord.projectId,
+        llmProvider: tokenRecord.llmProvider,
+        snippets: {
+          curl: snippets.curl,
+          node: snippets.node,
+          python: snippets.python,
+          java: snippets.java
+        },
         expiresAt: tokenRecord.expiresAt,
         createdAt: tokenRecord.createdAt,
         rotatedFrom: tokenId,
@@ -293,12 +412,7 @@ export class UsersController {
    */
   static async getUsageSummary(ctx: Context): Promise<void> {
     try {
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
       const { startDate, endDate } = ctx.query;
 
       const start = startDate ? new Date(startDate as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // 30 days ago
@@ -321,6 +435,61 @@ export class UsersController {
       };
     } catch (error) {
       logger.error('Failed to get usage summary:', error);
+      throw error;
+    }
+  }
+
+  /**
+ * Forgot Password
+ * POST /_api/users/forgot-password
+ */
+  static async forgotPassword(ctx: Context): Promise<void> {
+
+    try {
+      const { email } = ctx.request.body as { email: string };
+
+      if (typeof email !== 'string' || !email.trim()) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Email is required");
+      }
+
+      if (!email.toLowerCase().endsWith('@bilvantis.io')) {
+        throw new Error('Only Bilvantis email addresses are allowed');
+      }
+
+      const regex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+      if (!regex.test(email)) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Invalid email format");
+      }
+
+      if (!email || !email.trim()) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Email is required");
+      }
+
+      const user = await userRepository.findByEmail(email);
+      // Check user exist
+      if (!user) {
+        throw new ProxyError(ProxyErrorType.NOT_FOUND_ERROR, 404, "User not found");
+      }
+
+      // Generate Firebase reset link
+      const resetLink = await firebaseAdmin.generatePasswordResetLink(email);
+      if (!resetLink) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Failed to generate reset link");
+      }
+
+      const html = forgotPasswordTemplate(user.name, resetLink);
+      await brevoService.sendMail(
+        user.email,
+        "Reset Your Password",
+        html
+      );
+      ctx.body = {
+        message: "Password reset email sent"
+      };
+
+    }
+    catch (error) {
+      logger.error("Forgot password error:", error);
       throw error;
     }
   }

@@ -5,10 +5,12 @@ export interface IPersonalAccessToken extends Document {
   tokenIdentifier: string; // Unique identifier for token lookup
   tokenHash: string; // Hashed full token (identifier + secret)
   userId: mongoose.Types.ObjectId;
+  createdBy?: mongoose.Types.ObjectId;
   projectId?: mongoose.Types.ObjectId;
   name: string;
   description?: string;
   scopes: string[];
+  llmProvider: string;
   lastUsedAt?: Date;
   expiresAt?: Date;
   createdAt: Date;
@@ -38,6 +40,10 @@ const personalAccessTokenSchema = new Schema<IPersonalAccessToken>(
       ref: 'User',
       required: true,
     },
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+    },
     projectId: {
       type: Schema.Types.ObjectId,
       ref: 'Project',
@@ -59,6 +65,10 @@ const personalAccessTokenSchema = new Schema<IPersonalAccessToken>(
         'admin',
       ],
     }],
+    llmProvider: {
+      type: String,
+      enum: ['openai', 'anthropic', 'gemini']
+    },
     lastUsedAt: {
       type: Date,
     },
@@ -77,6 +87,7 @@ const personalAccessTokenSchema = new Schema<IPersonalAccessToken>(
 
 // Indexes (token index is created automatically by unique constraint)
 personalAccessTokenSchema.index({ userId: 1 });
+personalAccessTokenSchema.index({ createdBy: 1 });
 personalAccessTokenSchema.index({ projectId: 1 });
 personalAccessTokenSchema.index({ isRevoked: 1 });
 personalAccessTokenSchema.index({ expiresAt: 1 });
