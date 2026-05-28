@@ -5,10 +5,12 @@ export interface CreateTokenDto {
   tokenIdentifier: string; // Token identifier for lookups
   tokenHash: string; // Hashed full token
   userId: mongoose.Types.ObjectId;
+  createdBy?: mongoose.Types.ObjectId;
   projectId?: mongoose.Types.ObjectId;
   name: string;
   description?: string;
   scopes: string[];
+  llmProvider: string;
   expiresAt?: Date;
 }
 
@@ -39,7 +41,7 @@ export class TokenRepository {
     userId: string | mongoose.Types.ObjectId,
     includeRevoked = false
   ): Promise<IPersonalAccessToken[]> {
-    const query: any = { userId };
+    const query: any = { $or: [{ userId }, { createdBy: userId }] };
     if (!includeRevoked) {
       query.isRevoked = false;
     }

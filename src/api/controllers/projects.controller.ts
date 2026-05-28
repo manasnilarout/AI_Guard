@@ -7,6 +7,9 @@ import { usageTracker } from '../../interceptors/response/usage-tracker';
 import { quotaChecker } from '../../interceptors/request/quota-checker';
 import { logger } from '../../utils/logger';
 import { ProxyError, ProxyErrorType } from '../../types/proxy';
+import mongoose from 'mongoose';
+import { rateLimiter } from '../../interceptors';
+import { validateApiKeyService } from '../../services/validatepikeyservice.repository';
 
 export class ProjectsController {
   /**
@@ -15,20 +18,37 @@ export class ProjectsController {
    */
   static async createProject(ctx: Context): Promise<void> {
     try {
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
-      const { name } = ctx.request.body as any;
+      const userId = ctx.state.auth!.user._id;
+      const { name, description } = ctx.request.body as any;
 
       if (!name || !name.trim()) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Project name is required');
       }
 
+      if (name.length < 4) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Name must be at least 4 characters long");
+      }
+      if (!description || !description.trim()) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Project description is required');
+      }
+
+      if (description.length > 200) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Description is too long")
+      }
+
+      try {
+        const existingProject = await projectRepository.findByName(name.trim());
+        if (existingProject) {
+          throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 409, 'Project name already exists');
+        }
+      } catch (error) {
+        logger.error('Project name already exists:', error);
+        throw error;
+      }
+
       const project = await projectRepository.createProject({
         name: name.trim(),
+        description,
         ownerId: userId,
       });
 
@@ -51,27 +71,41 @@ export class ProjectsController {
    */
   static async listProjects(ctx: Context): Promise<void> {
     try {
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
-      
-      const projects = await projectRepository.findByMember(userId);
-      
+      const userId = ctx.state.auth!.user._id;
+      const page = parseInt(ctx.query.page as string) || 1;
+      const limit = parseInt(ctx.query.limit as string) || 20;
+      const { projects, total } = await projectRepository.findByMember(userId, { page, limit });
+
       ctx.body = {
         projects: projects.map(project => ({
           id: project._id,
           name: project.name,
           ownerId: project.ownerId,
+          teamId: project.teamIds,
           memberCount: project.members.length,
+          members: project.members.map(member => {
+            if (typeof member.userId === 'object' && member.userId !== null && 'name' in member.userId) {
+              return {
+                memberUserId: member.userId._id,
+                name: member.userId.name,
+              };
+            }
+            return {
+              memberUserId: member.userId,
+              name: undefined,
+            };
+          }),
           apiKeyCount: project.apiKeys.length,
-          role: project.members.find(m => m.userId.toString() === userId.toString())?.role,
+          role: project.members.find(m => m.userId._id.toString() === userId.toString())?.role,
           createdAt: project.createdAt,
           updatedAt: project.updatedAt,
         })),
-        total: projects.length,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        },
       };
     } catch (error) {
       logger.error('Failed to list projects:', error);
@@ -86,15 +120,10 @@ export class ProjectsController {
   static async getProject(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
 
-      const project = await projectRepository.findById(projectId);
-      
+      const project = await projectRepository.findByIdWithMembers(projectId);
+
       if (!project) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project not found');
       }
@@ -106,16 +135,39 @@ export class ProjectsController {
       }
 
       const userRole = await projectRepository.getMemberRole(projectId, userId);
-      
+
       ctx.body = {
         id: project._id,
         name: project.name,
+        description: project.description,
         ownerId: project.ownerId,
-        members: project.members.map(member => ({
-          userId: member.userId,
-          role: member.role,
-          addedAt: member.addedAt,
-        })),
+        teamId: project.teamIds,
+        members: project.members.map(member => {
+          let memberUserId, name, email;
+          if (
+            typeof member.userId === 'object' &&
+            member.userId !== null &&
+            'name' in member.userId &&
+            'email' in member.userId
+          ) {
+            memberUserId = member.userId._id as mongoose.Types.ObjectId;
+            name = member.userId.name as string;
+            email = member.userId.email as string;
+          } else {
+            memberUserId = member.userId;
+            name = undefined;
+            email = undefined;
+          }
+
+          return {
+            memberUserId,
+            name,
+            email,
+            role: member.role,
+            addedAt: member.addedAt,
+          };
+        }),
+
         settings: project.settings,
         usage: project.usage,
         userRole,
@@ -135,12 +187,11 @@ export class ProjectsController {
   static async updateProject(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
+      const existingProject = await projectRepository.findById(projectId);
+      if (!existingProject) {
+        throw new ProxyError(ProxyErrorType.NOT_FOUND_ERROR, 404, 'Project not found');
       }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
       const { name, settings } = ctx.request.body as any;
 
       // Check permissions
@@ -151,14 +202,37 @@ export class ProjectsController {
 
       const updateData: any = {};
       if (name !== undefined) updateData.name = name;
-      if (settings !== undefined) updateData.settings = settings;
+      type Plan = 'free' | 'pro' | 'enterprise' | 'custom';
+      if (settings?.plan) {
+        const validPlans = ['free', 'pro', 'enterprise', 'custom'];
+        if (!validPlans.includes(settings.plan)) {
+          throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Invalid plan');
+        }
+
+        const plan = settings.plan as Plan;
+        const rateDefaults = rateLimiter.getDefaults();
+        const quotaDefaults = quotaChecker.getDefaults();
+
+        updateData.settings = {
+          ...existingProject.settings,
+          plan,
+          rateLimitOverride:
+            plan === 'custom'
+              ? settings.rateLimitOverride
+              : rateDefaults[plan],
+          quotaOverride:
+            plan === 'custom'
+              ? settings.quotaOverride
+              : quotaDefaults[plan],
+        };
+      }
 
       if (Object.keys(updateData).length === 0) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'No valid fields to update');
       }
 
       const updatedProject = await projectRepository.updateProject(projectId, updateData);
-      
+
       if (!updatedProject) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project not found');
       }
@@ -182,15 +256,10 @@ export class ProjectsController {
   static async deleteProject(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
 
       const project = await projectRepository.findById(projectId);
-      
+
       if (!project) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project not found');
       }
@@ -201,7 +270,7 @@ export class ProjectsController {
       }
 
       await projectRepository.deleteProject(projectId);
-      
+
       ctx.body = {
         message: 'Project deleted successfully',
         projectId,
@@ -220,12 +289,7 @@ export class ProjectsController {
   static async addApiKey(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
       const { provider, apiKey } = ctx.request.body as any;
 
       // Check permissions
@@ -242,6 +306,20 @@ export class ProjectsController {
       const validProviders = ['openai', 'anthropic', 'gemini'];
       if (!validProviders.includes(provider.toLowerCase())) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Invalid provider');
+      }
+
+      switch (provider.toLowerCase()) {
+        case 'openai':
+          await validateApiKeyService.validateOpenAIKey(apiKey);
+          break;
+        case 'anthropic':
+          await validateApiKeyService.validateAnthropicKey(apiKey);
+          break;
+        case 'gemini':
+          await validateApiKeyService.validateGeminiKey(apiKey);
+          break;
+        default:
+          throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Unsupported provider");
       }
 
       // Encrypt the API key
@@ -278,12 +356,7 @@ export class ProjectsController {
   static async listApiKeys(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
 
       // Check if user is a member
       const isMember = await projectRepository.isMember(projectId, userId);
@@ -292,7 +365,7 @@ export class ProjectsController {
       }
 
       const project = await projectRepository.findById(projectId);
-      
+
       if (!project) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project not found');
       }
@@ -335,12 +408,7 @@ export class ProjectsController {
     try {
       const projectId = ctx.params.id;
       const keyId = ctx.params.keyId;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
 
       // Check permissions
       const userRole = await projectRepository.getMemberRole(projectId, userId);
@@ -349,7 +417,7 @@ export class ProjectsController {
       }
 
       const updatedProject = await projectRepository.removeApiKey(projectId, keyId);
-      
+
       if (!updatedProject) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project or API key not found');
       }
@@ -372,12 +440,7 @@ export class ProjectsController {
   static async getUsageStats(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
       const { startDate, endDate } = ctx.query;
 
       // Check if user is a member
@@ -390,7 +453,7 @@ export class ProjectsController {
       const end = endDate ? new Date(endDate as string) : new Date();
 
       const stats = await usageTracker.getProjectUsageStats(projectId, start, end);
-      
+
       ctx.body = {
         projectId,
         period: { start, end },
@@ -409,12 +472,7 @@ export class ProjectsController {
   static async getQuotaStatus(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
 
       // Check if user is a member
       const isMember = await projectRepository.isMember(projectId, userId);
@@ -423,13 +481,13 @@ export class ProjectsController {
       }
 
       const project = await projectRepository.findById(projectId);
-      
+
       if (!project) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project not found');
       }
 
       const quotaStatus = await quotaChecker.checkQuota(project);
-      
+
       ctx.body = {
         projectId,
         ...quotaStatus,
@@ -447,18 +505,22 @@ export class ProjectsController {
   static async addMember(ctx: Context): Promise<void> {
     try {
       const projectId = ctx.params.id;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
       const { email, role } = ctx.request.body as any;
 
       // Check permissions (only owner and admin can add members)
       const userRole = await projectRepository.getMemberRole(projectId, userId);
       if (!userRole || !['owner', 'admin'].includes(userRole)) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 403, 'Insufficient permissions');
+      }
+
+      const regex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+      if (!regex.test(email)) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, "Invalid email format");
+      }
+
+      if (!role || !['admin', 'member'].includes(role)) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 403, 'Invalid role');
       }
 
       if (!email || !role) {
@@ -503,6 +565,84 @@ export class ProjectsController {
   }
 
   /**
+   * Update member from project
+   * PUT /_api/projects/:id/members/:memberId
+   */
+
+  static async updateMemberRole(ctx: Context): Promise<void> {
+    try {
+      const projectId = ctx.params.id;
+      const memberId = ctx.params.memberId;
+      const { role } = ctx.request.body as { role: 'admin' | 'member' }
+
+      const userId = ctx.state.auth!.user._id;
+
+      //Check valid roles
+      if (!role || !['admin', 'member'].includes(role)) {
+        throw new ProxyError(
+          ProxyErrorType.INVALID_REQUEST,
+          400,
+          'Invalid role'
+        );
+      }
+
+      // Check permissions
+      const userRole = await projectRepository.getMemberRole(projectId, userId);
+      if (!userRole || !['owner', 'admin'].includes(userRole)) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 403, 'Insufficient permissions');
+      }
+
+      //Check project exist
+      const project = await projectRepository.findById(projectId);
+      if (!project) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project not found');
+      }
+
+      //Check member exist
+      const selectedMember = project.members.find(
+        (m) => m.userId == memberId
+      );
+      if (!selectedMember) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'selected member not found');
+      }
+
+      //Owner role cannot be changed
+      if (selectedMember.role == 'owner') {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Cannot change owner role');
+      }
+
+      //Prevent to change same role
+      if (selectedMember.role == role) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 400, 'Member already has this role');
+      }
+
+      // Update role
+      const updatedProject = await projectRepository.updateMemberRole(
+        projectId,
+        memberId,
+        role
+      );
+
+      if (!updatedProject) {
+        throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project or member not found');
+      }
+
+      ctx.body = {
+        message: 'Member role updated successfully',
+        member: {
+          userId: memberId,
+          role,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+    } catch (error) {
+      logger.error('Failed to update member role:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Remove member from project
    * DELETE /_api/projects/:id/members/:memberId
    */
@@ -510,12 +650,7 @@ export class ProjectsController {
     try {
       const projectId = ctx.params.id;
       const memberId = ctx.params.memberId;
-      if (!ctx.state.auth) {
-        ctx.status = 401;
-        ctx.body = { error: 'Authentication required' };
-        return;
-      }
-      const userId = ctx.state.auth.user._id;
+      const userId = ctx.state.auth!.user._id;
 
       // Check permissions
       const userRole = await projectRepository.getMemberRole(projectId, userId);
@@ -534,7 +669,7 @@ export class ProjectsController {
       }
 
       const updatedProject = await projectRepository.removeMember(projectId, memberId);
-      
+
       if (!updatedProject) {
         throw new ProxyError(ProxyErrorType.INVALID_REQUEST, 404, 'Project or member not found');
       }

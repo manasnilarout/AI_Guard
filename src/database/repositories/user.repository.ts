@@ -5,11 +5,13 @@ export interface CreateUserDto {
   firebaseUid?: string;
   email: string;
   name: string;
+  role?: 'owner' | 'admin' | 'member';
   status?: 'active' | 'suspended' | 'deleted';
 }
 
 export interface UpdateUserDto {
   name?: string;
+  role?: 'owner' | 'admin' | 'member';
   status?: 'active' | 'suspended' | 'deleted';
   defaultProject?: mongoose.Types.ObjectId;
   lastLoginAt?: Date;
@@ -25,12 +27,20 @@ export class UserRepository {
     return await User.findById(userId).exec();
   }
 
+  async getActiveUsers(): Promise<IUser[]> {
+    return await User.find({ status: "active" }).exec()
+  }
+
   async findByFirebaseUid(uid: string): Promise<IUser | null> {
     return await User.findOne({ firebaseUid: uid }).exec();
   }
 
   async findByEmail(email: string): Promise<IUser | null> {
     return await User.findOne({ email: email.toLowerCase() }).exec();
+  }
+
+  async countUsers(): Promise<number> {
+    return await User.countDocuments();
   }
 
   async updateUser(
