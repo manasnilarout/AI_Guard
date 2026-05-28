@@ -4,10 +4,14 @@ import { AuthMiddleware } from '../../auth/auth-middleware';
 
 const router = new Router();
 
+//forgot password
+router.post('/forgot-password',UsersController.forgotPassword);
+
 // All user routes require authentication
 router.use(AuthMiddleware.requireAuth());
 
 // Profile management
+router.get('/', UsersController.listProfiles);
 router.get('/profile', UsersController.getProfile);
 router.put('/profile', UsersController.updateProfile);
 router.delete('/account', UsersController.deleteAccount);

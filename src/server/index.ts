@@ -17,6 +17,8 @@ import { quotaChecker } from '../interceptors/request/quota-checker';
 import { requestValidator } from '../interceptors/request/request-validator';
 import { usageTracker } from '../interceptors/response/usage-tracker';
 import { AuthMiddleware } from '../auth/auth-middleware';
+import { resetDailyAndMonthlyUsage } from '../utils/usage-cron';
+import { brevoService } from '../services/mail/mail.service';
 
 // Create Koa app
 const app = new Koa();
@@ -103,12 +105,24 @@ export async function startServer(): Promise<void> {
     process.exit(1);
   }
 
+  //Initialize usage reset here
+  resetDailyAndMonthlyUsage();
+
   // Initialize Firebase Admin SDK
   try {
     firebaseAdmin.initialize();
     logger.info('Firebase Admin SDK initialized');
   } catch (error) {
     logger.error('Failed to initialize Firebase:', error);
+    // Don't exit, Firebase is optional
+  }
+
+  //Initialize Brevo Mail Service
+  try {
+    brevoService.initialize();
+    logger.info('Brevo mail service initialized');
+  } catch (error) {
+    logger.error('Failed to initialize brevo mail service:', error);
     // Don't exit, Firebase is optional
   }
   
