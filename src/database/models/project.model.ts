@@ -16,6 +16,7 @@ export interface IProjectMember {
 }
 
 export interface IProjectSettings {
+  plan?: 'free' | 'pro' | 'enterprise' | 'custom';
   rateLimitOverride?: {
     windowMs: number;
     maxRequests: number;
@@ -35,11 +36,13 @@ export interface IUsageMetrics {
     cost: number;
   };
   currentMonth: {
+    month: string;
     requests: number;
     tokens: number;
     cost: number;
   };
   currentDay: {
+    date: string;
     requests: number;
     tokens: number;
     cost: number;
@@ -50,7 +53,9 @@ export interface IUsageMetrics {
 export interface IProject extends Document {
   _id: mongoose.Types.ObjectId;
   name: string;
+  description: string;
   ownerId: mongoose.Types.ObjectId;
+  teamIds?: mongoose.Types.ObjectId[];
   members: IProjectMember[];
   apiKeys: IProviderApiKey[];
   settings: IProjectSettings;
@@ -123,9 +128,23 @@ const projectSchema = new Schema<IProject>(
       ref: 'User',
       required: true,
     },
+    description: {
+      type: String,
+    },
+    teamIds: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: 'Team',
+      }
+    ],
     members: [projectMemberSchema],
     apiKeys: [providerApiKeySchema],
     settings: {
+      plan: {
+        type: String,
+        enum: ['free', 'pro', 'enterprise', 'custom'],
+        default: 'free',
+      },
       rateLimitOverride: {
         windowMs: Number,
         maxRequests: Number,
@@ -144,11 +163,13 @@ const projectSchema = new Schema<IProject>(
         cost: { type: Number, default: 0 },
       },
       currentMonth: {
+        month: { type: String, default: new Date().toISOString().slice(0, 7) },
         requests: { type: Number, default: 0 },
         tokens: { type: Number, default: 0 },
         cost: { type: Number, default: 0 },
       },
       currentDay: {
+        date: { type: String, default: new Date().toISOString().slice(0, 10) },
         requests: { type: Number, default: 0 },
         tokens: { type: Number, default: 0 },
         cost: { type: Number, default: 0 },
@@ -165,5 +186,6 @@ const projectSchema = new Schema<IProject>(
 projectSchema.index({ ownerId: 1 });
 projectSchema.index({ 'members.userId': 1 });
 projectSchema.index({ name: 1 });
+projectSchema.index({ teamIds: 1 });
 
 export const Project = mongoose.model<IProject>('Project', projectSchema);

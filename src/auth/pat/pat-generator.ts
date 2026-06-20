@@ -5,9 +5,11 @@ import { logger } from '../../utils/logger';
 
 export interface GenerateTokenOptions {
   userId: string;
+  createdBy?: string;
   projectId?: string;
   name: string;
   scopes: string[];
+  llmProvider: string;
   expiresInDays?: number;
 }
 
@@ -24,12 +26,12 @@ export class PatGenerator {
     try {
       // Generate the token with identifier and secret
       const { fullToken, identifier } = TokenValidator.generateTokenString();
-      
+
       // Hash the full token for storage
       const tokenHash = await TokenValidator.hashToken(fullToken);
-      
+
       // Calculate expiration date if specified
-      const expiresAt = options.expiresInDays
+      const expiresAt = typeof options.expiresInDays === 'number'
         ? new Date(Date.now() + options.expiresInDays * 24 * 60 * 60 * 1000)
         : undefined;
 
@@ -38,9 +40,11 @@ export class PatGenerator {
         tokenIdentifier: identifier,
         tokenHash,
         userId: options.userId as any,
+        createdBy: options.createdBy as any,
         projectId: options.projectId as any,
         name: options.name,
         scopes: options.scopes,
+        llmProvider: options.llmProvider,
         expiresAt,
       });
 
@@ -71,14 +75,15 @@ export class PatGenerator {
   ): Promise<GeneratedToken | null> {
     try {
       const existingToken = await tokenRepository.findById(tokenId);
-      
+
       if (!existingToken) {
         logger.warn(`Token not found for rotation: ${tokenId}`);
         return null;
       }
 
-      // Verify the token belongs to the user
-      if (existingToken.userId.toString() !== userId) {
+      // Verify the token belongs to the user or was created by the user
+      const canRotate = existingToken.createdBy?.toString() === userId;
+      if (!canRotate) {
         logger.warn(`Unauthorized token rotation attempt: ${tokenId} by user ${userId}`);
         return null;
       }
@@ -88,10 +93,12 @@ export class PatGenerator {
 
       // Generate new token with same properties
       const newToken = await this.generateToken({
-        userId,
+        userId: existingToken.userId.toString(),
+        createdBy: userId,
         projectId: existingToken.projectId?.toString(),
         name: `${existingToken.name} (Rotated)`,
         scopes: existingToken.scopes,
+        llmProvider: existingToken.llmProvider,
         expiresInDays: existingToken.expiresAt
           ? Math.ceil((existingToken.expiresAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000))
           : undefined,
